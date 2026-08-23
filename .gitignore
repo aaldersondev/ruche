@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# configuration et instances locales
+/instances
+settings.json
+accounts.json

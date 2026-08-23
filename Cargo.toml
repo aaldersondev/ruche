@@ -1,0 +1,46 @@
+[package]
+name = "ruche"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Launcher Minecraft multi-comptes : plusieurs clients cote a cote sans saturer la machine"
+authors = ["Julien"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/aaldersondev/ruche"
+keywords = ["minecraft", "launcher", "multi-instance"]
+categories = ["games"]
+
+[lib]
+name = "ruche"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ruche"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.36.1"
+egui_extras = "0.36.1"
+md5 = "0.8.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+ureq = { version = "3.4.0", features = ["json"] }
+zip = "8.6.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
