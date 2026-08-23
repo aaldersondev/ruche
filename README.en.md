@@ -13,7 +13,7 @@ It downloads no versions of its own: it reuses the official installation
 (`%APPDATA%\.minecraft`), including vanilla, OptiFine, Fabric and Forge — the
 `inheritsFrom` chain is resolved.
 
-![Ruche](docs/capture.png)
+![Ruche](docs/capture-en.png)
 
 ## Install
 
