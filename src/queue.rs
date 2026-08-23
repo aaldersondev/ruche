@@ -26,7 +26,10 @@ pub enum State {
     Queued,
     /// Téléchargement de la version avant même de réserver de la mémoire.
     Preparing,
-    WaitingRoom,
+    /// Il n'y a pas assez de mémoire libre.
+    WaitingRam,
+    /// La mémoire irait, mais le plafond d'instances est atteint.
+    WaitingSlot,
     Starting,
     Running,
     Stopped,
@@ -39,7 +42,8 @@ impl State {
         match self {
             State::Queued => s.state_queued,
             State::Preparing => s.state_preparing,
-            State::WaitingRoom => s.state_waiting,
+            State::WaitingRam => s.state_waiting,
+            State::WaitingSlot => s.state_waiting_slot,
             State::Starting => s.state_starting,
             State::Running => s.state_running,
             State::Stopped => s.state_stopped,
@@ -51,7 +55,11 @@ impl State {
     pub fn is_pending(self) -> bool {
         matches!(
             self,
-            State::Queued | State::Preparing | State::WaitingRoom | State::Starting
+            State::Queued
+                | State::Preparing
+                | State::WaitingRam
+                | State::WaitingSlot
+                | State::Starting
         )
     }
 
@@ -303,10 +311,12 @@ impl Manager {
     pub fn clear_queue(&self) {
         let mut count = 0;
         if let Ok(mut list) = self.shared.instances.lock() {
-            for instance in list
-                .iter_mut()
-                .filter(|i| matches!(i.state, State::Queued | State::WaitingRoom) && !i.cancelled)
-            {
+            for instance in list.iter_mut().filter(|i| {
+                matches!(
+                    i.state,
+                    State::Queued | State::WaitingRam | State::WaitingSlot
+                ) && !i.cancelled
+            }) {
                 instance.cancelled = true;
                 instance.state = State::Aborted;
                 count += 1;
@@ -417,9 +427,14 @@ fn wait_for_room(shared: &Arc<Shared>, job: &Job) -> bool {
         if slot_free && ram_ok {
             return true;
         }
+        let reason = if !slot_free {
+            State::WaitingSlot
+        } else {
+            State::WaitingRam
+        };
+        shared.update(job.id, |i| i.state = reason);
         if !announced {
             announced = true;
-            shared.update(job.id, |i| i.state = State::WaitingRoom);
             let s = shared.s();
             if !slot_free {
                 shared.log(fill(
@@ -713,7 +728,9 @@ mod tests {
     #[test]
     fn states_are_classified() {
         assert!(State::Queued.is_pending());
-        assert!(State::WaitingRoom.is_pending());
+        assert!(State::WaitingRam.is_pending());
+        assert!(State::WaitingSlot.is_pending());
+        assert!(State::Preparing.is_pending());
         assert!(State::Starting.is_pending());
         assert!(!State::Running.is_pending());
         assert!(State::Crashed.is_over());
@@ -749,7 +766,22 @@ mod tests {
             ..Default::default()
         };
         let id = manager.enqueue(Account::offline("Alt2"), "1.8.9".into(), settings);
-        std::thread::sleep(Duration::from_secs(7));
+
+        // Tant qu'elle patiente, la carte doit dire pourquoi : c'est la memoire
+        // qui manque, pas le plafond d'instances. On regarde avant l'abandon,
+        // qui tombe a trois secondes.
+        std::thread::sleep(Duration::from_millis(1500));
+        {
+            let list = manager.shared.instances.lock().unwrap();
+            let instance = list.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(
+                instance.state,
+                State::WaitingRam,
+                "l'etat doit nommer la vraie raison de l'attente"
+            );
+        }
+
+        std::thread::sleep(Duration::from_secs(6));
         let list = manager.shared.instances.lock().unwrap();
         let instance = list.iter().find(|i| i.id == id).unwrap();
         assert_eq!(instance.state, State::Aborted);

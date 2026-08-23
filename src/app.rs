@@ -1021,7 +1021,11 @@ impl App {
                     let color = match row.state {
                         State::Running => GREEN,
                         State::Crashed => RED,
-                        State::Queued | State::WaitingRoom | State::Starting => AMBER,
+                        State::Queued
+                        | State::Preparing
+                        | State::WaitingRam
+                        | State::WaitingSlot
+                        | State::Starting => AMBER,
                         _ => MUTED,
                     };
                     card(ui, |ui| {
@@ -1048,7 +1052,7 @@ impl App {
                                         if row.rss > 0 {
                                             ui.label(RichText::new("·").color(MUTED));
                                             ui.label(
-                                                RichText::new(format!("{} {}", row.rss, s.col_ram))
+                                                RichText::new(format!("{}{}", row.rss, s.unit_mb))
                                                     .size(11.5)
                                                     .color(MUTED),
                                             );

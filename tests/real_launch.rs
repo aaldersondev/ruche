@@ -165,3 +165,64 @@ fn chaque_version_installee_produit_une_commande_complete() {
     }
     assert!(checked > 0, "aucune version exploitable");
 }
+
+/// Le cas vu en usage reel : une instance retenue par le plafond doit le dire,
+/// au lieu d'annoncer un manque de memoire.
+#[test]
+#[ignore = "lance vraiment un client"]
+fn le_plafond_dinstances_est_nomme() {
+    let mut settings = base_settings();
+    settings.max_instances = 1;
+    settings.ignore_ram_guard = true; // on veut isoler le plafond, pas la RAM
+    settings.wait_timeout_s = 120;
+    let Some(version_id) = first_installed(&settings) else {
+        eprintln!("aucune version de test installee");
+        return;
+    };
+
+    let manager = Manager::new(|| {});
+    manager.set_catalog(std::sync::Arc::new(alt_catalog(&settings)));
+    let premier = manager.enqueue(
+        Account::offline("AltCap1"),
+        version_id.clone(),
+        settings.clone(),
+    );
+    let second = manager.enqueue(Account::offline("AltCap2"), version_id, settings);
+
+    // On attend que le premier tourne et que le second soit retenu.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut etat = State::Queued;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let list = manager.shared.instances.lock().unwrap();
+        etat = list.iter().find(|i| i.id == second).unwrap().state;
+        if etat == State::WaitingSlot {
+            break;
+        }
+        assert!(
+            !etat.is_over(),
+            "le second n'aurait pas du s'arreter ({etat:?})"
+        );
+    }
+    assert_eq!(
+        etat,
+        State::WaitingSlot,
+        "le second doit annoncer le plafond, pas la memoire"
+    );
+
+    let log = manager.shared.log.lock().unwrap();
+    assert!(
+        log.iter().any(|l| l.contains("plafond")),
+        "le journal doit dire la meme chose que la carte : {log:?}"
+    );
+    drop(log);
+    println!(
+        "second en attente : {}",
+        etat.label(ruche::i18n::Lang::Fr.strings())
+    );
+
+    manager.clear_queue();
+    manager.kill(premier);
+    std::thread::sleep(Duration::from_secs(3));
+    manager.shutdown();
+}

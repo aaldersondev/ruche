@@ -110,6 +110,7 @@ strings! {
     col_uptime => "Durée", "Uptime";
     state_queued => "en file", "queued";
     state_waiting => "attente RAM", "waiting for RAM";
+    state_waiting_slot => "plafond atteint", "cap reached";
     state_starting => "démarrage", "starting";
     state_running => "en jeu", "running";
     state_stopped => "arrêté", "stopped";
