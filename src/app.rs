@@ -10,6 +10,7 @@ use crate::auth::msa::{self, DeviceFlow};
 use crate::config::{Account, Priority, Settings, load_accounts, sanitize, save_accounts};
 use crate::discord::{self, Presence};
 use crate::i18n::{Lang, Strings, fill};
+use crate::mc::manifest::{Catalog, Kind};
 use crate::mc::{java, version};
 use crate::queue::{Manager, State};
 use crate::sys;
@@ -110,11 +111,27 @@ impl MsForm {
 
 // ---------------------------------------------------------------- application
 
+/// Resultat d'une actualisation du manifeste, partage avec son thread.
+type ManifestSlot = Arc<Mutex<Option<Result<Catalog, String>>>>;
+
+/// Ce que montre le selecteur de version.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    Installed,
+    Releases,
+    Snapshots,
+    All,
+}
+
 pub struct App {
     settings: Settings,
     accounts: Vec<Account>,
     manager: Manager,
-    versions: Vec<String>,
+    catalog: Arc<Catalog>,
+    filter: Filter,
+    search: String,
+    /// Actualisation du manifeste en cours, dans son thread.
+    manifest_job: Option<ManifestSlot>,
     java_hint: String,
     java_ok: bool,
     tab: Tab,
@@ -131,8 +148,17 @@ impl App {
         let manager = Manager::new(move || repaint.request_repaint());
         manager.set_lang(settings.lang);
 
+        let catalog = Arc::new(Catalog::load(
+            &settings.mc_dir,
+            crate::config::config_dir().as_path(),
+        ));
+        manager.set_catalog(Arc::clone(&catalog));
+
         let mut app = Self {
-            versions: version::list_versions(&settings.mc_dir),
+            catalog,
+            filter: Filter::Installed,
+            search: String::new(),
+            manifest_job: None,
             accounts: load_accounts(),
             settings,
             manager,
@@ -146,12 +172,70 @@ impl App {
         };
         app.presence
             .configure(&app.settings.discord_app_id, app.settings.discord_enabled);
-        if app.settings.version.is_empty() || !app.versions.contains(&app.settings.version) {
-            app.settings.version = app.versions.first().cloned().unwrap_or_default();
+        if app.settings.version.is_empty() || app.catalog.find(&app.settings.version).is_none() {
+            app.settings.version = app
+                .catalog
+                .entries
+                .iter()
+                .find(|e| e.installed && e.ready)
+                .map(|e| e.id.clone())
+                .unwrap_or_default();
         }
         app.refresh_java_hint();
         app.greet();
+        // La liste complete se rafraichit toute seule au demarrage.
+        app.start_manifest_refresh();
         app
+    }
+
+    /// Relit le catalogue sur le disque (versions installees comprises).
+    fn reload_catalog(&mut self) {
+        self.catalog = Arc::new(Catalog::load(
+            &self.settings.mc_dir,
+            crate::config::config_dir().as_path(),
+        ));
+        self.manager.set_catalog(Arc::clone(&self.catalog));
+    }
+
+    /// Va chercher la liste a jour chez Mojang, sans bloquer l'interface.
+    fn start_manifest_refresh(&mut self) {
+        if self.manifest_job.is_some() {
+            return;
+        }
+        let slot: ManifestSlot = Arc::new(Mutex::new(None));
+        let target = Arc::clone(&slot);
+        let mc_dir = self.settings.mc_dir.clone();
+        let cache = crate::config::config_dir();
+        std::thread::spawn(move || {
+            let result = Catalog::refresh(&mc_dir, &cache);
+            if let Ok(mut out) = target.lock() {
+                *out = Some(result);
+            }
+        });
+        self.manifest_job = Some(slot);
+    }
+
+    /// Recupere le resultat de l'actualisation si elle est terminee.
+    fn poll_manifest(&mut self) {
+        let Some(slot) = self.manifest_job.clone() else {
+            return;
+        };
+        let outcome = slot.lock().ok().and_then(|mut o| o.take());
+        let Some(outcome) = outcome else { return };
+        self.manifest_job = None;
+        let s = self.s();
+        match outcome {
+            Ok(catalog) => {
+                let count = catalog.entries.len();
+                self.catalog = Arc::new(catalog);
+                self.manager.set_catalog(Arc::clone(&self.catalog));
+                self.manager
+                    .log(fill(s.manifest_updated, &[&count.to_string()]));
+            }
+            Err(error) => {
+                self.manager.log(fill(s.manifest_failed, &[&error]));
+            }
+        }
     }
 
     fn s(&self) -> &'static Strings {
@@ -165,7 +249,7 @@ impl App {
         self.manager.log(fill(
             s.log_versions_found,
             &[
-                &self.versions.len().to_string(),
+                &self.catalog.installed_count().to_string(),
                 &self.settings.mc_dir.join("versions").display().to_string(),
             ],
         ));
@@ -181,10 +265,8 @@ impl App {
     }
 
     fn refresh_versions(&mut self) {
-        self.versions = version::list_versions(&self.settings.mc_dir);
-        if !self.versions.contains(&self.settings.version) {
-            self.settings.version = self.versions.first().cloned().unwrap_or_default();
-        }
+        self.reload_catalog();
+        self.start_manifest_refresh();
         self.refresh_java_hint();
     }
 
@@ -194,6 +276,15 @@ impl App {
         if self.settings.version.is_empty() {
             self.java_hint = s.no_version.to_string();
             self.java_ok = false;
+            return;
+        }
+        if !self
+            .catalog
+            .find(&self.settings.version)
+            .map(|e| e.installed)
+            .unwrap_or(false)
+        {
+            self.java_hint = s.version_to_download.to_string();
             return;
         }
         self.java_hint = match version::resolve(&self.settings.mc_dir, &self.settings.version) {
@@ -437,6 +528,7 @@ impl eframe::App for App {
         for account in self.manager.take_refreshed() {
             self.upsert(account);
         }
+        self.poll_manifest();
         let ctx = ui.ctx().clone();
 
         self.nav_bar(ui);
@@ -533,8 +625,10 @@ impl App {
 
     fn launch_bar(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
-        let versions = self.versions.clone();
+        let catalog = Arc::clone(&self.catalog);
         let count = self.checked_count();
+        let filter = &mut self.filter;
+        let search = &mut self.search;
         let java_hint = self.java_hint.clone();
         let java_ok = self.java_ok;
         let has_version = !self.settings.version.is_empty();
@@ -556,6 +650,9 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(s.version).color(MUTED).size(12.0));
                                 egui::ComboBox::from_id_salt("version")
+                                    // Sans ca, cliquer dans la recherche ou sur
+                                    // un filtre refermerait la liste.
+                                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                                     .selected_text(
                                         RichText::new(if settings.version.is_empty() {
                                             "—".to_string()
@@ -565,20 +662,20 @@ impl App {
                                         .size(15.0)
                                         .strong(),
                                     )
-                                    .width(230.0)
+                                    .width(260.0)
+                                    .height(420.0)
                                     .show_ui(ui, |ui| {
-                                        for name in &versions {
-                                            if ui
-                                                .selectable_value(
-                                                    &mut settings.version,
-                                                    name.clone(),
-                                                    name,
-                                                )
-                                                .clicked()
-                                            {
-                                                version_changed = true;
-                                            }
-                                        }
+                                        let picked = version_menu(
+                                            ui,
+                                            &catalog,
+                                            &mut settings.version,
+                                            search,
+                                            filter,
+                                            s,
+                                            false,
+                                        );
+                                        version_changed |= picked.changed;
+                                        refresh |= picked.refresh;
                                     });
                                 if ui.small_button(s.refresh).clicked() {
                                     refresh = true;
@@ -1253,7 +1350,9 @@ impl App {
 
     fn account_dialog(&mut self, ctx: &egui::Context) -> bool {
         let s = self.s();
-        let versions = self.versions.clone();
+        let catalog = Arc::clone(&self.catalog);
+        let filter = &mut self.filter;
+        let search = &mut self.search;
         let Dialog::Account(form) = &mut self.dialog else {
             return false;
         };
@@ -1280,21 +1379,16 @@ impl App {
 
                     ui.label(s.field_version);
                     egui::ComboBox::from_id_salt("version-compte")
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .selected_text(if form.version.is_empty() {
                             s.field_version_default.to_string()
                         } else {
                             form.version.clone()
                         })
-                        .width(240.0)
+                        .width(260.0)
+                        .height(360.0)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut form.version,
-                                String::new(),
-                                s.field_version_default,
-                            );
-                            for name in &versions {
-                                ui.selectable_value(&mut form.version, name.clone(), name);
-                            }
+                            version_menu(ui, &catalog, &mut form.version, search, filter, s, true);
                         });
                     ui.end_row();
 
@@ -1641,6 +1735,128 @@ impl App {
 
 // ------------------------------------------------------------------ briques
 
+/// Une version reste visible si elle est installee, si elle passe le filtre
+/// choisi, et si elle contient le texte cherche.
+fn keeps(entry: &crate::mc::manifest::Entry, filter: Filter, needle: &str) -> bool {
+    let by_kind = entry.installed
+        || match filter {
+            Filter::Installed => false,
+            Filter::Releases => entry.kind == Kind::Release,
+            Filter::Snapshots => matches!(entry.kind, Kind::Release | Kind::Snapshot),
+            Filter::All => true,
+        };
+    by_kind && (needle.is_empty() || entry.id.to_lowercase().contains(needle))
+}
+
+/// Ce que le menu de version renvoie a l'appelant.
+#[derive(Default)]
+struct Picked {
+    changed: bool,
+    refresh: bool,
+}
+
+/// Menu de choix d'une version : recherche, filtres, et la liste complete.
+fn version_menu(
+    ui: &mut egui::Ui,
+    catalog: &Catalog,
+    current: &mut String,
+    search: &mut String,
+    filter: &mut Filter,
+    s: &'static Strings,
+    allow_default: bool,
+) -> Picked {
+    let mut picked = Picked::default();
+
+    ui.add(
+        egui::TextEdit::singleline(search)
+            .hint_text(s.version_search)
+            .desired_width(f32::INFINITY),
+    );
+    ui.horizontal(|ui| {
+        for (value, label) in [
+            (Filter::Installed, s.filter_installed),
+            (Filter::Releases, s.filter_releases),
+            (Filter::Snapshots, s.filter_snapshots),
+            (Filter::All, s.filter_all),
+        ] {
+            if ui
+                .selectable_label(*filter == value, RichText::new(label).size(11.0))
+                .clicked()
+            {
+                *filter = value;
+            }
+        }
+    });
+    ui.separator();
+
+    let needle = search.trim().to_lowercase();
+    let mut shown = 0;
+    egui::ScrollArea::vertical()
+        .max_height(250.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            if allow_default
+                && needle.is_empty()
+                && ui
+                    .selectable_label(current.is_empty(), s.field_version_default)
+                    .clicked()
+            {
+                current.clear();
+                picked.changed = true;
+                ui.close();
+            }
+            for entry in &catalog.entries {
+                if !keeps(entry, *filter, &needle) {
+                    continue;
+                }
+                shown += 1;
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(*current == entry.id, &entry.id)
+                        .clicked()
+                    {
+                        *current = entry.id.clone();
+                        picked.changed = true;
+                        ui.close();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (text, color) = if entry.installed {
+                            (s.version_installed, GREEN)
+                        } else {
+                            (s.version_to_download, MUTED)
+                        };
+                        ui.label(RichText::new(text).size(10.0).color(color));
+                    });
+                });
+            }
+        });
+
+    if shown == 0 {
+        ui.label(RichText::new(s.no_match).size(11.0).color(MUTED));
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        let line = if catalog.remote_known {
+            fill(
+                s.versions_line,
+                &[
+                    &catalog.entries.len().to_string(),
+                    &catalog.installed_count().to_string(),
+                ],
+            )
+        } else {
+            s.versions_offline.to_string()
+        };
+        ui.label(RichText::new(line).size(10.5).color(MUTED));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button(s.refresh_manifest).clicked() {
+                picked.refresh = true;
+            }
+        });
+    });
+    picked
+}
+
 /// Carte : le motif de base des listes.
 fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
@@ -1871,6 +2087,54 @@ mod tests {
             let brightest = color.r().max(color.g()).max(color.b());
             assert!(brightest > 200, "teinte {hue} trop sombre : {color:?}");
         }
+    }
+
+    fn entry(id: &str, kind: Kind, installed: bool) -> crate::mc::manifest::Entry {
+        crate::mc::manifest::Entry {
+            id: id.into(),
+            kind,
+            url: None,
+            installed,
+            ready: installed,
+        }
+    }
+
+    #[test]
+    fn the_filter_always_keeps_installed_versions() {
+        let local = entry("1.20.1-forge", Kind::Modded, true);
+        for filter in [
+            Filter::Installed,
+            Filter::Releases,
+            Filter::Snapshots,
+            Filter::All,
+        ] {
+            assert!(keeps(&local, filter, ""), "une version installee disparait");
+        }
+    }
+
+    #[test]
+    fn the_filter_sorts_remote_versions_by_kind() {
+        let release = entry("1.20.1", Kind::Release, false);
+        let snapshot = entry("24w01a", Kind::Snapshot, false);
+        let old = entry("b1.7.3", Kind::Old, false);
+
+        assert!(!keeps(&release, Filter::Installed, ""));
+        assert!(keeps(&release, Filter::Releases, ""));
+        assert!(!keeps(&snapshot, Filter::Releases, ""));
+        assert!(keeps(&snapshot, Filter::Snapshots, ""));
+        assert!(!keeps(&old, Filter::Snapshots, ""));
+        assert!(keeps(&old, Filter::All, ""));
+    }
+
+    #[test]
+    fn the_search_narrows_the_list() {
+        let release = entry("1.16.5", Kind::Release, false);
+        assert!(keeps(&release, Filter::Releases, "1.16"));
+        assert!(keeps(&release, Filter::Releases, "16.5"));
+        assert!(!keeps(&release, Filter::Releases, "1.17"));
+        // la recherche ne ressuscite pas une version filtree
+        let old = entry("b1.7.3", Kind::Old, false);
+        assert!(!keeps(&old, Filter::Releases, "b1.7"));
     }
 
     #[test]

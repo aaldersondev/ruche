@@ -9,9 +9,9 @@ la fois, et rien ne se lance s'il ne reste pas assez de RAM.
 Une ruche, c'est beaucoup d'ouvrières dans un seul cadre, et une colonie qui se
 régule d'elle-même. C'est tout le programme.
 
-Il ne télécharge aucune version : il réutilise l'installation officielle
-(`%APPDATA%\.minecraft`) — vanilla, OptiFine, Fabric et Forge compris, la chaîne
-`inheritsFrom` est résolue.
+Il s'appuie sur l'installation officielle (`%APPDATA%\.minecraft`) — vanilla,
+OptiFine, Fabric et Forge compris, la chaîne `inheritsFrom` est résolue — et
+télécharge à la demande les versions qui n'y sont pas encore.
 
 ![Ruche](docs/capture.png)
 
@@ -43,6 +43,29 @@ cargo build --release
 Le bouton **Calculer un réglage sûr** relit la RAM libre et propose un nombre
 d'instances et de cœurs. Il plafonne à quatre clients : au-delà, c'est la VRAM
 qui lâche avant la RAM.
+
+## Toutes les versions
+
+Le sélecteur ne se limite pas à ce que contient `.minecraft` : il liste le
+**catalogue complet de Mojang** — plus de 900 entrées, sorties, snapshots et
+versions anciennes — avec une recherche et quatre filtres. Ce qui est déjà là
+est marqué *installée*, le reste *à télécharger*.
+
+![Sélecteur de version](docs/versions.png)
+
+Choisir une version absente suffit : au lancement, la file télécharge dans
+l'ordre le json de version, le jar client, les libraries manquantes et les
+ressources, puis démarre le jeu. L'avancement s'affiche dans la carte de
+l'instance, et **les téléchargements passent avant la réservation mémoire** —
+inutile de bloquer une place pendant un transfert.
+
+Ce qui est déjà sur le disque n'est jamais retéléchargé, le jar client et les
+ressources sont vérifiés par empreinte SHA-1, et rien n'atterrit à son
+emplacement final avant d'être complet. Un profil moddé entraîne l'installation
+de la version dont il hérite.
+
+Le manifeste est mis en cache : sans réseau, le launcher garde la liste et se
+contente de dire ce qu'il ne peut pas télécharger.
 
 ## Comptes
 
@@ -124,6 +147,8 @@ première ligne est la commande Java complète — rejouable telle quelle.
 | Module | Rôle |
 |---|---|
 | `mc::version` | lecture des json de `versions/`, fusion `inheritsFrom`, règles d'OS et de features |
+| `mc::manifest` | catalogue Mojang, fusionné avec les profils locaux, mis en cache |
+| `mc::install` | téléchargement du json, du jar, des libraries et des ressources |
 | `mc::command` | classpath, natives, substitution des arguments, `options.txt`, `servers.dat` |
 | `mc::java` | choix du JRE (runtimes du launcher officiel, JDK système, `PATH`) |
 | `queue` | file de lancement, garde-fous mémoire, surveillance des process |
@@ -156,8 +181,13 @@ ignorés par défaut :
 
 ```bash
 cargo test --test real_launch -- --ignored --nocapture
+cargo test --test real_install -- --ignored --nocapture
 cargo test --lib discord -- --ignored --nocapture
 ```
+
+`real_install` supprime une version du disque, la réinstalle depuis les serveurs
+de Mojang et vérifie que la commande de lancement est complète ; il efface aussi
+une ressource pour vérifier qu'elle revient à l'identique.
 
 Vérifiés sur cette machine : 1.7.10, 1.8 / 1.8.8 / 1.8.9, 1.12.2, 1.20.1,
 1.20.1-Forge 47.4.13, 1.20.2-Forge 48.1.0, 1.21.8, 1.21.11, OptiFine, Fabric
@@ -168,8 +198,6 @@ Vérifiés sur cette machine : 1.7.10, 1.8 / 1.8.8 / 1.8.9, 1.12.2, 1.20.1,
 
 - Windows est la cible : la détection de fenêtre, l'affinité et DPAPI y sont
   natives. Le reste compile ailleurs, en mode dégradé.
-- Le launcher ne télécharge pas les versions : une version jamais lancée depuis
-  le launcher officiel n'a pas de jar client, et il le dit.
 - Les libraries manquantes sont récupérées à la volée quand le json donne une
   URL ; sinon le lancement s'arrête avec la liste des fichiers.
 

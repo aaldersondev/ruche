@@ -14,6 +14,8 @@ use crate::auth::msa;
 use crate::config::{Account, Settings};
 use crate::i18n::{Lang, Strings, fill};
 use crate::mc::command::{self, LaunchOptions};
+use crate::mc::install;
+use crate::mc::manifest::Catalog;
 use crate::mc::version::{self, Version};
 use crate::sys;
 
@@ -22,6 +24,8 @@ const LOG_CAP: usize = 400;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     Queued,
+    /// Téléchargement de la version avant même de réserver de la mémoire.
+    Preparing,
     WaitingRoom,
     Starting,
     Running,
@@ -34,6 +38,7 @@ impl State {
     pub fn label(self, s: &'static Strings) -> &'static str {
         match self {
             State::Queued => s.state_queued,
+            State::Preparing => s.state_preparing,
             State::WaitingRoom => s.state_waiting,
             State::Starting => s.state_starting,
             State::Running => s.state_running,
@@ -44,7 +49,10 @@ impl State {
     }
 
     pub fn is_pending(self) -> bool {
-        matches!(self, State::Queued | State::WaitingRoom | State::Starting)
+        matches!(
+            self,
+            State::Queued | State::Preparing | State::WaitingRoom | State::Starting
+        )
     }
 
     pub fn is_over(self) -> bool {
@@ -64,6 +72,8 @@ pub struct Instance {
     pub started_epoch: Option<u64>,
     pub exit_code: Option<i32>,
     pub log_path: Option<PathBuf>,
+    /// Étape d'installation en cours : intitulé, fait, total.
+    pub step: Option<install::Step>,
     child: Option<Child>,
     cancelled: bool,
 }
@@ -90,6 +100,8 @@ struct Job {
 pub struct Shared {
     /// Langue courante : le journal est ecrit dedans, y compris depuis les threads.
     lang: Mutex<Lang>,
+    /// Catalogue des versions, pour savoir ou telecharger ce qui manque.
+    catalog: Mutex<Arc<Catalog>>,
     pub instances: Mutex<Vec<Instance>>,
     pub log: Mutex<VecDeque<String>>,
     /// Comptes premium dont la session a ete renouvelee, a reporter dans l'UI.
@@ -168,6 +180,7 @@ impl Manager {
     pub fn new(notify: impl Fn() + Send + Sync + 'static) -> Self {
         let shared = Arc::new(Shared {
             lang: Mutex::new(Lang::default()),
+            catalog: Mutex::new(Arc::new(Catalog::empty())),
             instances: Mutex::new(Vec::new()),
             log: Mutex::new(VecDeque::new()),
             refreshed: Mutex::new(Vec::new()),
@@ -199,6 +212,14 @@ impl Manager {
         self.shared.log(message);
     }
 
+    /// Donne a la file le catalogue courant : elle y lit les adresses de
+    /// telechargement des versions absentes.
+    pub fn set_catalog(&self, catalog: Arc<Catalog>) {
+        if let Ok(mut slot) = self.shared.catalog.lock() {
+            *slot = catalog;
+        }
+    }
+
     /// Change la langue du journal (les threads la relisent a chaque message).
     pub fn set_lang(&self, lang: Lang) {
         if let Ok(mut slot) = self.shared.lang.lock() {
@@ -224,6 +245,7 @@ impl Manager {
                 started_epoch: None,
                 exit_code: None,
                 log_path: None,
+                step: None,
                 child: None,
                 cancelled: false,
             });
@@ -326,6 +348,19 @@ fn worker(shared: Arc<Shared>, receiver: mpsc::Receiver<Job>) {
         if shared.stopping.load(Ordering::Relaxed) || shared.is_cancelled(job.id) {
             continue;
         }
+        // Les telechargements passent avant la reservation memoire :
+        // inutile de garder une place pendant une heure de transfert.
+        if let Err(message) = prepare(&shared, &job) {
+            shared.update(job.id, |i| {
+                i.state = State::Crashed;
+                i.step = None;
+            });
+            shared.log(fill(
+                shared.s().log_install_failed,
+                &[&job.account.name, &message],
+            ));
+            continue;
+        }
         if !wait_for_room(&shared, &job) {
             continue;
         }
@@ -334,6 +369,33 @@ fn worker(shared: Arc<Shared>, receiver: mpsc::Receiver<Job>) {
             shared.log(format!("[{}] {message}", job.account.name));
         }
     }
+}
+
+/// Telecharge ce qui manque pour que la version soit jouable.
+fn prepare(shared: &Arc<Shared>, job: &Job) -> Result<(), String> {
+    let mc_dir = &job.settings.mc_dir;
+    if install::is_complete(mc_dir, &job.version) {
+        return Ok(());
+    }
+    let catalog = shared
+        .catalog
+        .lock()
+        .map(|c| Arc::clone(&c))
+        .unwrap_or_else(|_| Arc::new(Catalog::empty()));
+    let s = shared.s();
+    shared.update(job.id, |i| i.state = State::Preparing);
+    shared.log(fill(s.log_installing, &[&job.account.name, &job.version]));
+
+    let id = job.id;
+    let reporter = Arc::clone(shared);
+    let report = move |step: install::Step| {
+        reporter.update(id, |i| i.step = Some(step.clone()));
+    };
+    install::ensure(mc_dir, &job.version, &catalog, s, &report)?;
+
+    shared.update(job.id, |i| i.step = None);
+    shared.log(fill(s.log_installed, &[&job.account.name, &job.version]));
+    Ok(())
 }
 
 /// Bloque tant qu'il n'y a pas la place pour une instance de plus.
@@ -714,6 +776,7 @@ mod tests {
             started_epoch: None,
             exit_code: None,
             log_path: None,
+            step: None,
             child: None,
             cancelled: false,
         };

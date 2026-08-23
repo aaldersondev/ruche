@@ -168,6 +168,43 @@ strings! {
     unit_mb => " Mo", " MB";
     unit_s => " s", " s";
 
+    // ---------------------------------------------------------- versions
+    version_search => "Chercher une version…", "Search a version…";
+    filter_installed => "Installées", "Installed";
+    filter_releases => "Sorties", "Releases";
+    filter_snapshots => "Snapshots", "Snapshots";
+    filter_all => "Toutes", "All";
+    version_installed => "installée", "installed";
+    version_to_download => "à télécharger", "to download";
+    versions_line => "{0} versions · {1} installées", "{0} versions · {1} installed";
+    versions_offline =>
+        "liste hors ligne : seules les versions déjà installées sont proposées",
+        "offline list: only the versions already installed are offered";
+    refresh_manifest => "Actualiser la liste", "Refresh the list";
+    manifest_updated => "liste des versions à jour : {0} disponibles",
+                        "version list updated: {0} available";
+    manifest_failed => "liste des versions non actualisée : {0}",
+                       "version list not updated: {0}";
+    no_match => "aucune version ne correspond", "no version matches";
+
+    // ------------------------------------------------------- installation
+    state_preparing => "installation", "installing";
+    install_jar => "jar client {0}", "client jar {0}";
+    install_libraries => "libraries", "libraries";
+    install_asset_index => "index des ressources", "asset index";
+    install_assets => "ressources", "assets";
+    install_deep => "héritage trop profond à partir de {0}",
+                    "inheritance chain too deep from {0}";
+    install_unknown_version =>
+        "{0} : version inconnue, actualise la liste des versions",
+        "{0}: unknown version, refresh the version list";
+    install_no_jar => "{0} : aucun jar client à télécharger",
+                      "{0}: no client jar to download";
+    log_installing => "[{0}] installation de {1}", "[{0}] installing {1}";
+    log_installed => "[{0}] {1} prête", "[{0}] {1} ready";
+    log_install_failed => "[{0}] installation impossible — {1}",
+                          "[{0}] cannot install — {1}";
+
     // ------------------------------------------------------------- discord
     sec_discord => "Discord", "Discord";
     set_discord => "Afficher une activité Discord", "Show a Discord activity";

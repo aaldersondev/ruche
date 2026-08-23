@@ -2945,13 +2945,14 @@ dependencies = [
 
 [[package]]
 name = "ruche"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui_extras",
  "md5",
  "serde",
  "serde_json",
+ "sha1",
  "ureq",
  "windows-sys 0.61.2",
  "winresource",

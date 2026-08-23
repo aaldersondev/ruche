@@ -9,9 +9,9 @@ instance starts at a time, and nothing launches unless enough RAM is left.
 *Ruche* is French for beehive — many workers in a single frame, a colony that
 regulates itself. That is the whole idea.
 
-It downloads no versions of its own: it reuses the official installation
-(`%APPDATA%\.minecraft`), including vanilla, OptiFine, Fabric and Forge — the
-`inheritsFrom` chain is resolved.
+It builds on the official installation (`%APPDATA%\.minecraft`) — vanilla,
+OptiFine, Fabric and Forge included, the `inheritsFrom` chain is resolved — and
+downloads on demand the versions that are not there yet.
 
 ![Ruche](docs/capture-en.png)
 
@@ -43,6 +43,28 @@ cargo build --release
 The **Suggest safe settings** button re-reads free memory and suggests a number
 of instances and cores. It caps at four clients: past that, VRAM gives out before
 RAM does.
+
+## Every version
+
+The picker is not limited to what sits in `.minecraft`: it lists **Mojang's
+whole catalogue** — over 900 entries, releases, snapshots and old versions —
+with a search box and four filters. What is already there is tagged
+*installed*, the rest *to download*.
+
+![Version picker](docs/versions.png)
+
+Picking a version you do not have is enough: at launch the queue downloads the
+version json, the client jar, the missing libraries and the assets, in that
+order, then starts the game. Progress shows up in the instance card, and
+**downloads happen before memory is reserved** — no point holding a slot during
+a transfer.
+
+Anything already on disk is never fetched again, the client jar and the assets
+are checked against their SHA-1, and nothing lands at its final path before it
+is complete. A modded profile pulls in the version it inherits from.
+
+The manifest is cached: with no network, the launcher keeps the list and simply
+says what it cannot download.
 
 ## Accounts
 
@@ -124,6 +146,8 @@ is the complete Java command — replayable as is.
 | Module | Role |
 |---|---|
 | `mc::version` | reads the json files in `versions/`, merges `inheritsFrom`, evaluates OS and feature rules |
+| `mc::manifest` | Mojang catalogue, merged with local profiles, cached on disk |
+| `mc::install` | downloads the json, the jar, the libraries and the assets |
 | `mc::command` | classpath, natives, argument substitution, `options.txt`, `servers.dat` |
 | `mc::java` | JRE selection (official launcher runtimes, system JDKs, `PATH`) |
 | `queue` | launch queue, memory guard rails, process monitoring |
@@ -156,8 +180,13 @@ default:
 
 ```bash
 cargo test --test real_launch -- --ignored --nocapture
+cargo test --test real_install -- --ignored --nocapture
 cargo test --lib discord -- --ignored --nocapture
 ```
+
+`real_install` deletes a version from disk, reinstalls it from Mojang's servers
+and checks the launch command is complete; it also removes one asset to make
+sure it comes back byte for byte.
 
 Verified on the development machine: 1.7.10, 1.8 / 1.8.8 / 1.8.9, 1.12.2,
 1.20.1, 1.20.1-Forge 47.4.13, 1.20.2-Forge 48.1.0, 1.21.8, 1.21.11, OptiFine,
@@ -168,8 +197,6 @@ and 1.8.9, Forge 1.20.1 and 26.2 reach the game screen.
 
 - Windows is the target: window detection, affinity and DPAPI are native there.
   The rest compiles elsewhere in degraded mode.
-- The launcher does not download versions: one that was never launched from the
-  official launcher has no client jar, and it says so.
 - Missing libraries are fetched on the fly when the json provides a URL;
   otherwise the launch stops with the list of files.
 

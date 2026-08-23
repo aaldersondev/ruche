@@ -96,7 +96,7 @@ pub fn list_versions(mc_dir: &Path) -> Vec<String> {
 }
 
 /// Trie 1.21.8 avant 1.8.9, et les noms non numeriques a la fin.
-fn sort_key(name: &str) -> (u8, i64, i64, i64, String) {
+pub(crate) fn sort_key(name: &str) -> (u8, i64, i64, i64, String) {
     match parse_release(name) {
         Some((a, b, c)) => (
             0,

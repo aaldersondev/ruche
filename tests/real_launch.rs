@@ -10,6 +10,7 @@
 use std::time::{Duration, Instant};
 
 use ruche::config::{Account, Settings};
+use ruche::mc::manifest::Catalog;
 use ruche::mc::{command, version};
 use ruche::queue::{Manager, State};
 use ruche::sys;
@@ -32,12 +33,22 @@ fn base_settings() -> Settings {
     }
 }
 
+/// Catalogue complet : disque, ou reseau si le cache est vide.
+fn alt_catalog(settings: &Settings) -> Catalog {
+    let cache = ruche::config::config_dir();
+    let disk = Catalog::load(&settings.mc_dir, &cache);
+    if disk.remote_known {
+        disk
+    } else {
+        Catalog::refresh(&settings.mc_dir, &cache).expect("manifeste injoignable")
+    }
+}
+
 fn first_installed(settings: &Settings) -> Option<String> {
     let installed = version::list_versions(&settings.mc_dir);
-    // De quoi viser une version precise : RUCHE_TEST_VERSION=1.20.1
-    if let Ok(wanted) = std::env::var("RUCHE_TEST_VERSION")
-        && installed.contains(&wanted)
-    {
+    // De quoi viser une version precise, installee ou non : la file la
+    // telechargera au besoin. RUCHE_TEST_VERSION=1.20.1
+    if let Ok(wanted) = std::env::var("RUCHE_TEST_VERSION") {
         return Some(wanted);
     }
     CANDIDATES
@@ -57,6 +68,8 @@ fn le_client_demarre_vraiment() {
     println!("version testee : {version_id}");
 
     let manager = Manager::new(|| {});
+    // Sans catalogue, la file ne saurait pas ou telecharger une version absente.
+    manager.set_catalog(std::sync::Arc::new(alt_catalog(&settings)));
     let account = Account::offline("AltTest");
     let id = manager.enqueue(account, version_id.clone(), settings);
 
