@@ -8,11 +8,23 @@
 use eframe::egui;
 use ruche::app;
 
+/// L'icone est stockee en RGBA brut : pas besoin d'un decodeur d'images.
+fn app_icon() -> egui::IconData {
+    const SIDE: u32 = 64;
+    const PIXELS: &[u8] = include_bytes!("../assets/icon_64.rgba");
+    egui::IconData {
+        rgba: PIXELS.to_vec(),
+        width: SIDE,
+        height: SIDE,
+    }
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 780.0])
             .with_min_inner_size([960.0, 620.0])
+            .with_icon(app_icon())
             .with_title("Ruche"),
         ..Default::default()
     };

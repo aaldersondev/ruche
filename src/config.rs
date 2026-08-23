@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{Lang, Strings};
+
 /// Dossier de configuration : `%APPDATA%\Ruche` sur Windows.
 pub fn config_dir() -> PathBuf {
     #[cfg(windows)]
@@ -98,6 +100,9 @@ pub struct Settings {
     pub server_name: String,
     pub extra_jvm: String,
     pub azure_client_id: String,
+    pub lang: Lang,
+    pub discord_enabled: bool,
+    pub discord_app_id: String,
 }
 
 impl Default for Settings {
@@ -127,11 +132,19 @@ impl Default for Settings {
             server_name: "Serveur".into(),
             extra_jvm: String::new(),
             azure_client_id: String::new(),
+            lang: Lang::default(),
+            discord_enabled: false,
+            discord_app_id: String::new(),
         }
     }
 }
 
 impl Settings {
+    /// Textes dans la langue choisie.
+    pub fn s(&self) -> &'static Strings {
+        self.lang.strings()
+    }
+
     pub fn path() -> PathBuf {
         config_dir().join("settings.json")
     }
@@ -288,7 +301,9 @@ pub fn now_secs() -> u64 {
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    // Un fichier retouche au Bloc-notes ou par PowerShell commence par un BOM :
+    // sans ca, la configuration serait silencieusement remise a zero.
+    serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
 }
 
 fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Result<()> {
@@ -330,6 +345,17 @@ mod tests {
         let text = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_reset_everything() {
+        let dir = std::env::temp_dir().join("ruche-test-bom");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "\u{feff}{\"xmx_mb\": 4096}").unwrap();
+        let settings: Settings = read_json(&path).expect("fichier avec BOM illisible");
+        assert_eq!(settings.xmx_mb, 4096);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

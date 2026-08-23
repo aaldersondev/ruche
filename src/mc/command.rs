@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::version::{Features, Version, lib_rules, os_name, rules_allow};
 use crate::config::{Account, Settings};
+use crate::i18n::{Strings, fill};
 
 /// Fichier attendu par le jeu mais absent du disque.
 #[derive(Clone, Debug)]
@@ -18,6 +19,8 @@ pub struct Missing {
 
 /// Tout ce qui varie d'une instance a l'autre.
 pub struct LaunchOptions {
+    /// Textes dans la langue choisie, pour les rares erreurs remontees d'ici.
+    pub s: &'static Strings,
     pub game_dir: PathBuf,
     pub natives_dir: PathBuf,
     pub java: PathBuf,
@@ -34,6 +37,7 @@ impl LaunchOptions {
     /// Options d'une instance a partir des reglages generaux.
     pub fn from_settings(settings: &Settings, account: &Account, version: &Version) -> Self {
         Self {
+            s: settings.s(),
             game_dir: account.game_dir(settings),
             natives_dir: version.natives_dir(&settings.mc_dir),
             java: super::java::find_java(version, false),
@@ -251,7 +255,11 @@ pub fn extract_natives(
 }
 
 /// Recupere les libraries absentes quand le json donne une URL.
-pub fn download_missing(missing: &[Missing], mut progress: impl FnMut(String)) -> Vec<PathBuf> {
+pub fn download_missing(
+    missing: &[Missing],
+    s: &'static Strings,
+    mut progress: impl FnMut(String),
+) -> Vec<PathBuf> {
     let mut failed = Vec::new();
     for item in missing {
         let Some(url) = &item.url else {
@@ -263,7 +271,7 @@ pub fn download_missing(missing: &[Missing], mut progress: impl FnMut(String)) -
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        progress(format!("téléchargement de {name}"));
+        progress(fill(s.log_downloading, &[&name]));
         if let Err(err) = fetch(url, &item.path) {
             progress(format!("{name} : {err}"));
             failed.push(item.path.clone());
@@ -297,7 +305,8 @@ pub fn build(
     let (jars, missing) = classpath(mc_dir, version, &features);
     extract_natives(mc_dir, version, &features, &opts.natives_dir)
         .map_err(|e| format!("natives : {e}"))?;
-    std::fs::create_dir_all(&opts.game_dir).map_err(|e| format!("dossier d'instance : {e}"))?;
+    std::fs::create_dir_all(&opts.game_dir)
+        .map_err(|e| fill(opts.s.log_instance_dir, &[&e.to_string()]))?;
 
     let separator = if cfg!(windows) { ";" } else { ":" };
     let classpath_str = jars

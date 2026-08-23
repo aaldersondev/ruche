@@ -8,6 +8,8 @@
 pub mod app;
 pub mod auth;
 pub mod config;
+pub mod discord;
+pub mod i18n;
 pub mod mc;
 pub mod queue;
 pub mod sys;

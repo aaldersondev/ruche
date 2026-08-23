@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::auth::msa;
 use crate::config::{Account, Settings};
+use crate::i18n::{Lang, Strings, fill};
 use crate::mc::command::{self, LaunchOptions};
 use crate::mc::version::{self, Version};
 use crate::sys;
@@ -30,15 +31,15 @@ pub enum State {
 }
 
 impl State {
-    pub fn label(self) -> &'static str {
+    pub fn label(self, s: &'static Strings) -> &'static str {
         match self {
-            State::Queued => "en file",
-            State::WaitingRoom => "attente RAM",
-            State::Starting => "démarrage",
-            State::Running => "en jeu",
-            State::Stopped => "arrêté",
-            State::Crashed => "échec",
-            State::Aborted => "abandonné",
+            State::Queued => s.state_queued,
+            State::WaitingRoom => s.state_waiting,
+            State::Starting => s.state_starting,
+            State::Running => s.state_running,
+            State::Stopped => s.state_stopped,
+            State::Crashed => s.state_crashed,
+            State::Aborted => s.state_aborted,
         }
     }
 
@@ -59,6 +60,8 @@ pub struct Instance {
     pub pid: Option<u32>,
     pub rss_mb: u64,
     pub started_at: Option<Instant>,
+    /// Meme instant, en secondes epoch : Discord veut un horodatage absolu.
+    pub started_epoch: Option<u64>,
     pub exit_code: Option<i32>,
     pub log_path: Option<PathBuf>,
     child: Option<Child>,
@@ -85,6 +88,8 @@ struct Job {
 }
 
 pub struct Shared {
+    /// Langue courante : le journal est ecrit dedans, y compris depuis les threads.
+    lang: Mutex<Lang>,
     pub instances: Mutex<Vec<Instance>>,
     pub log: Mutex<VecDeque<String>>,
     /// Comptes premium dont la session a ete renouvelee, a reporter dans l'UI.
@@ -94,6 +99,13 @@ pub struct Shared {
 }
 
 impl Shared {
+    pub fn s(&self) -> &'static Strings {
+        self.lang
+            .lock()
+            .map(|lang| lang.strings())
+            .unwrap_or_else(|_| Lang::default().strings())
+    }
+
     pub fn running_count(&self) -> usize {
         self.instances
             .lock()
@@ -155,6 +167,7 @@ impl Manager {
     /// `notify` est appele des qu'il y a du neuf a afficher.
     pub fn new(notify: impl Fn() + Send + Sync + 'static) -> Self {
         let shared = Arc::new(Shared {
+            lang: Mutex::new(Lang::default()),
             instances: Mutex::new(Vec::new()),
             log: Mutex::new(VecDeque::new()),
             refreshed: Mutex::new(Vec::new()),
@@ -186,6 +199,17 @@ impl Manager {
         self.shared.log(message);
     }
 
+    /// Change la langue du journal (les threads la relisent a chaque message).
+    pub fn set_lang(&self, lang: Lang) {
+        if let Ok(mut slot) = self.shared.lang.lock() {
+            *slot = lang;
+        }
+    }
+
+    pub fn strings(&self) -> &'static Strings {
+        self.shared.s()
+    }
+
     pub fn enqueue(&self, account: Account, version: String, settings: Settings) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut list) = self.shared.instances.lock() {
@@ -197,6 +221,7 @@ impl Manager {
                 pid: None,
                 rss_mb: 0,
                 started_at: None,
+                started_epoch: None,
                 exit_code: None,
                 log_path: None,
                 child: None,
@@ -204,7 +229,7 @@ impl Manager {
             });
         }
         self.shared
-            .log(format!("[{}] mis en file sur {version}", account.name));
+            .log(fill(self.shared.s().log_queued, &[&account.name, &version]));
         let _ = self.sender.send(Job {
             id,
             account,
@@ -230,7 +255,8 @@ impl Manager {
             }
         }
         if !name.is_empty() {
-            self.shared.log(format!("[{name}] arrêt demandé"));
+            self.shared
+                .log(fill(self.shared.s().log_stop_requested, &[&name]));
         }
     }
 
@@ -265,8 +291,10 @@ impl Manager {
             }
         }
         if count > 0 {
-            self.shared
-                .log(format!("file d'attente vidée ({count} instance(s))"));
+            self.shared.log(fill(
+                self.shared.s().log_queue_cleared,
+                &[&count.to_string()],
+            ));
         }
     }
 
@@ -330,16 +358,21 @@ fn wait_for_room(shared: &Arc<Shared>, job: &Job) -> bool {
         if !announced {
             announced = true;
             shared.update(job.id, |i| i.state = State::WaitingRoom);
+            let s = shared.s();
             if !slot_free {
-                shared.log(format!(
-                    "[{}] plafond de {} instances atteint, en attente",
-                    job.account.name, settings.max_instances
+                shared.log(fill(
+                    s.log_cap_reached,
+                    &[&job.account.name, &settings.max_instances.to_string()],
                 ));
             } else {
-                shared.log(format!(
-                    "[{}] RAM insuffisante ({avail} Mo libres, il en faut {needed} + {} Mo \
-                     de réserve) — en attente",
-                    job.account.name, settings.reserve_mb
+                shared.log(fill(
+                    s.log_ram_short,
+                    &[
+                        &job.account.name,
+                        &avail.to_string(),
+                        &needed.to_string(),
+                        &settings.reserve_mb.to_string(),
+                    ],
                 ));
             }
         }
@@ -347,10 +380,9 @@ fn wait_for_room(shared: &Arc<Shared>, job: &Job) -> bool {
         waited += 3;
         if waited >= settings.wait_timeout_s {
             shared.update(job.id, |i| i.state = State::Aborted);
-            shared.log(format!(
-                "[{}] abandonné : toujours pas de place apres {waited} s (baisse la RAM \
-                 par instance, ferme des applications, ou desactive le garde-fou)",
-                job.account.name
+            shared.log(fill(
+                shared.s().log_gave_up,
+                &[&job.account.name, &waited.to_string()],
             ));
             return false;
         }
@@ -366,14 +398,19 @@ fn start(
     let mut account = job.account.clone();
 
     // Compte premium : on renouvelle la session avant de lancer.
-    match msa::ensure_valid(&mut account, &settings.azure_client_id, |m| shared.log(m)) {
+    match msa::ensure_valid(
+        &mut account,
+        &settings.azure_client_id,
+        settings.lang,
+        |m| shared.log(m),
+    ) {
         Ok(true) => {
             if let Ok(mut list) = shared.refreshed.lock() {
                 list.push(account.clone());
             }
         }
         Ok(false) => {}
-        Err(e) => return Err(format!("compte Microsoft — {e}")),
+        Err(e) => return Err(fill(shared.s().log_premium_error, &[&e.0])),
     }
 
     let key = (settings.mc_dir.clone(), job.version.clone());
@@ -402,12 +439,11 @@ fn start(
 
     let (mut cmd, missing) = command::build(&settings.mc_dir, version, &account, &opts)?;
     if !missing.is_empty() {
-        shared.log(format!(
-            "[{}] {} fichier(s) manquant(s), tentative de téléchargement",
-            account.name,
-            missing.len()
+        shared.log(fill(
+            shared.s().log_missing_files,
+            &[&account.name, &missing.len().to_string()],
         ));
-        let failed = command::download_missing(&missing, |m| shared.log(m));
+        let failed = command::download_missing(&missing, shared.s(), |m| shared.log(m));
         if !failed.is_empty() {
             let names: Vec<String> = failed
                 .iter()
@@ -419,7 +455,7 @@ fn start(
                         .to_string()
                 })
                 .collect();
-            return Err(format!("fichiers introuvables : {}", names.join(", ")));
+            return Err(fill(shared.s().log_missing_failed, &[&names.join(", ")]));
         }
         cmd = command::build(&settings.mc_dir, version, &account, &opts)?.0;
     }
@@ -448,12 +484,14 @@ fn start(
         .try_clone()
         .map_err(|e| format!("duplication du log : {e}"))?;
 
-    shared.log(format!(
-        "[{}] lancement de {} ({} Mo, {})",
-        account.name,
-        job.version,
-        opts.xmx_mb,
-        opts.java.file_name().unwrap_or_default().to_string_lossy()
+    shared.log(fill(
+        shared.s().log_launching,
+        &[
+            &account.name,
+            &job.version,
+            &opts.xmx_mb.to_string(),
+            &opts.java.file_name().unwrap_or_default().to_string_lossy(),
+        ],
     ));
 
     let mut process = Command::new(&cmd[0]);
@@ -471,7 +509,7 @@ fn start(
     }
     let child = process
         .spawn()
-        .map_err(|e| format!("java n'a pas démarré : {e}"))?;
+        .map_err(|e| fill(shared.s().log_java_failed, &[&e.to_string()]))?;
     let pid = child.id();
     let slot = shared.running_count();
 
@@ -480,6 +518,7 @@ fn start(
         instance.pid = Some(pid);
         instance.state = State::Starting;
         instance.started_at = Some(Instant::now());
+        instance.started_epoch = Some(crate::config::now_secs());
         instance.log_path = Some(log_path.clone());
     });
 
@@ -525,7 +564,10 @@ fn wait_until_loaded(shared: &Arc<Shared>, job: &Job, pid: u32) {
                         i.state = State::Running;
                     }
                 });
-                shared.log(format!("[{}] client chargé (pid {pid})", job.account.name));
+                shared.log(fill(
+                    shared.s().log_loaded,
+                    &[&job.account.name, &pid.to_string()],
+                ));
                 return;
             }
         }
@@ -536,9 +578,9 @@ fn wait_until_loaded(shared: &Arc<Shared>, job: &Job, pid: u32) {
             i.state = State::Running;
         }
     });
-    shared.log(format!(
-        "[{}] toujours en chargement après {} s, on enchaîne",
-        job.account.name, settings.stagger_max_s
+    shared.log(fill(
+        shared.s().log_still_loading,
+        &[&job.account.name, &settings.stagger_max_s.to_string()],
     ));
 }
 
@@ -567,15 +609,16 @@ fn watcher(shared: Arc<Shared>) {
                         };
                         instance.rss_mb = 0;
                         instance.child = None;
+                        let s = shared.s();
                         let detail = match instance.log_path.as_ref() {
                             Some(path) if instance.state == State::Crashed => {
-                                format!(" — voir {}", path.display())
+                                fill(s.log_see, &[&path.display().to_string()])
                             }
                             _ => String::new(),
                         };
-                        messages.push(format!(
-                            "[{}] terminé (code {code}){detail}",
-                            instance.account
+                        messages.push(fill(
+                            s.log_finished,
+                            &[&instance.account, &code.to_string(), &detail],
                         ));
                         changed = true;
                     }
@@ -653,7 +696,7 @@ mod tests {
         let log = manager.shared.log.lock().unwrap();
         assert!(
             log.iter().any(|line| line.contains("RAM insuffisante")),
-            "le journal doit expliquer le refus"
+            "le journal doit expliquer le refus : {log:?}"
         );
         manager.shutdown();
     }
@@ -668,6 +711,7 @@ mod tests {
             pid: None,
             rss_mb: 0,
             started_at: None,
+            started_epoch: None,
             exit_code: None,
             log_path: None,
             child: None,

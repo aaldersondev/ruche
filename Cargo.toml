@@ -1,6 +1,6 @@
 [package]
 name = "ruche"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Launcher Minecraft multi-comptes : plusieurs clients cote a cote sans saturer la machine"
@@ -44,3 +44,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[build-dependencies]
+winresource = "0.1.31"

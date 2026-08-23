@@ -78,6 +78,33 @@ clair — c'est signalé ici, pas dissimulé.
 Double-clic sur une ligne : version et RAM propres à ce compte, par exemple les
 alts en 1.8.9 à 1 Go pendant que le compte principal est en 26.2 à 4 Go.
 
+## Langue
+
+L'interface existe en **français** et en **anglais** ; le choix se fait dans
+*Réglages → Langue et dossiers* et s'applique immédiatement, journal compris.
+Les traductions vivent dans [`src/i18n.rs`](src/i18n.rs) : chaque texte y est
+déclaré une fois avec ses deux versions côte à côte, et une macro en fait une
+structure de champs — un oubli de traduction ne compile pas.
+
+## Activité Discord
+
+*Réglages → Discord* affiche une Rich Presence : le nombre de clients ouverts,
+la version, et un chronomètre depuis le premier lancement. **Les pseudos ne
+sortent jamais** — tes contacts voient « 3 clients en jeu · sur 1.20.1 », rien
+de plus.
+
+Il faut une application Discord, gratuite :
+
+1. `discord.com/developers/applications` → *New Application* ;
+2. copier l'*Application ID* dans le launcher ;
+3. facultatif : *Rich Presence → Art Assets*, y déposer une image nommée
+   `ruche` pour l'icône de l'activité.
+
+Le dialogue se parle directement sur le tube IPC local
+(`\\.\pipe\discord-ipc-N`), sans bibliothèque tierce : une trame de huit
+octets puis du JSON. Discord fermé, tube absent ou connexion coupée en cours de
+route, le launcher retente en silence et l'état est affiché sous le réglage.
+
 ## Instances
 
 Chaque compte a son dossier de jeu (`%APPDATA%\Ruche\instances\<compte>`),
@@ -102,6 +129,8 @@ première ligne est la commande Java complète — rejouable telle quelle.
 | `queue` | file de lancement, garde-fous mémoire, surveillance des process |
 | `auth` | UUID hors-ligne et connexion Microsoft |
 | `sys` | mémoire, working set, détection de fenêtre, affinité, DPAPI |
+| `i18n` | les deux langues, déclarées côte à côte |
+| `discord` | Rich Presence, en direct sur le tube IPC |
 | `app` | interface egui |
 
 Un détail qui coûte cher si on le rate : **le jar client à mettre au classpath
@@ -120,11 +149,14 @@ Les tests unitaires couvrent la fusion des versions, les règles, les chemins
 maven, l'UUID hors-ligne (valeurs de référence), le NBT de `servers.dat`, le
 chiffrement DPAPI et le refus de lancer sans mémoire.
 
-Deux tests d'intégration lancent **vraiment** le jeu et demandent une
-installation Minecraft ; ils sont donc ignorés par défaut :
+Un test parle au **vrai** Discord (il vérifie que le tube, le cadrage des
+trames et la détection d'un refus fonctionnent) et deux autres lancent
+**vraiment** le jeu ; tous demandent quelque chose de la machine, donc ils sont
+ignorés par défaut :
 
 ```bash
 cargo test --test real_launch -- --ignored --nocapture
+cargo test --lib discord -- --ignored --nocapture
 ```
 
 Vérifiés sur cette machine : 1.7.10, 1.8 / 1.8.8 / 1.8.9, 1.12.2, 1.20.1,
