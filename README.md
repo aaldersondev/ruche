@@ -1,3 +1,5 @@
+**Français** · [English](README.en.md)
+
 # Ruche
 
 Launcher Minecraft multi-comptes pour Windows, écrit en Rust. Il ouvre plusieurs
